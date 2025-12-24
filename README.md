@@ -1,6 +1,17 @@
 # PostgreSQL to OpenSearch CDC Pipeline
 
-A real-time Change Data Capture (CDC) pipeline that streams data from PostgreSQL to OpenSearch using Debezium and Kafka.
+Real-time Change Data Capture (CDC) pipeline that streams data from PostgreSQL to OpenSearch using Debezium and Kafka.
+
+## Table of Contents
+
+- [Architecture](#architecture)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+- [Setup Instructions](#setup-instructions)
+- [Usage](#usage)
+- [Monitoring](#monitoring)
+- [Troubleshooting](#troubleshooting)
+- [Advanced Topics](#advanced-topics)
 
 ## Architecture
 
@@ -9,47 +20,105 @@ A real-time Change Data Capture (CDC) pipeline that streams data from PostgreSQL
 │ PostgreSQL  │───▶│ Debezium  │───▶│  Kafka  │───▶│ OpenSearch │
 │  (Source)   │    │  (CDC)    │    │(Broker) │    │  (Target)  │
 └─────────────┘    └───────────┘    └─────────┘    └────────────┘
+                                           │
+                                           ▼
+                                  ┌─────────────────┐
+                                  │ Python Consumer │
+                                  └─────────────────┘
 ```
 
 **Data Flow:**
-1. PostgreSQL captures changes using logical replication
-2. Debezium reads changes and publishes to Kafka topics
+1. PostgreSQL captures changes using logical replication (`wal_level=logical`)
+2. Debezium reads WAL (Write-Ahead Log) and publishes CDC events to Kafka topics
 3. Python consumer reads from Kafka and writes to OpenSearch
 
-## Components
+**Components:**
 
 | Service | Port | Description |
 |---------|------|-------------|
-| PostgreSQL | 5432 | Source database (existing container: `postgres_container`) |
-| OpenSearch | 9200 | Target search engine (existing container: `ops`) |
-| Zookeeper | 2181 | Kafka coordination service |
+| PostgreSQL | 5432 | Source database (existing: `postgres_container`) |
+| OpenSearch | 9200 | Target search engine (existing: `ops`) |
+| Zookeeper | 2181 | Kafka coordination |
 | Kafka | 9092, 29092 | Message broker |
-| Kafka UI | 8080 | Web UI for monitoring Kafka topics |
-| Debezium Connect | 8083 | CDC connector for PostgreSQL |
-
-## Prerequisites
-
-- Docker and Docker Compose installed
-- PostgreSQL container named `postgres_container` running
-- OpenSearch container named `ops` running
-- Python 3 with `kafka-python` and `requests` libraries
-- `curl` and `jq` commands available
+| Kafka UI | 8080 | Web interface for monitoring |
+| Debezium Connect | 8083 | CDC connector |
 
 ## Quick Start
 
-### 1. Start CDC Services
+### Prerequisites
+
+- Docker and Docker Compose
+- PostgreSQL container named `postgres_container` running
+- OpenSearch container named `ops` running
+- Python 3 with `kafka-python` and `requests`
+
+### Installation
 
 ```bash
-# Start Kafka, Zookeeper, Debezium, and Kafka UI
+# 1. Install Python dependencies
+pip3 install kafka-python requests
+
+# 2. Start CDC services
 docker-compose -f docker-compose-cdc-only.yml up -d
 
-# Wait for services to be healthy (30-60 seconds)
+# 3. Wait for services to be healthy (30-60 seconds)
 docker ps
 ```
 
-### 2. Configure PostgreSQL for CDC
+### Setup Tables for CDC
 
-PostgreSQL must be configured with logical replication enabled. Restart your PostgreSQL container with these flags:
+**Option A: m_savings_account_transaction (Single Table)**
+
+```bash
+./setup-savings-table.sh         # Configure PostgreSQL
+./register-debezium-savings.sh   # Register Debezium
+./create-opensearch-indices.sh   # Create OpenSearch indices
+python3 kafka-to-opensearch.py   # Start syncing
+```
+
+**Option B: Card Tables (Multiple Tables with Existing Data)**
+
+```bash
+./setup-card-tables.sh           # Configure PostgreSQL
+./register-debezium-cards.sh     # Register Debezium
+./create-opensearch-indices.sh   # Create OpenSearch indices
+python3 kafka-to-opensearch-multi.py  # Start syncing (supports all tables)
+```
+
+### Verification
+
+```bash
+./quick-test.sh  # Automated health check
+```
+
+## Configuration
+
+All configuration is centralized in **`config.sh`**. Edit this file to customize:
+
+```bash
+# PostgreSQL
+POSTGRES_CONTAINER="postgres_container"
+POSTGRES_DATABASE="instance_template"
+
+# OpenSearch
+OPENSEARCH_URL="http://localhost:9200"
+
+# Kafka
+KAFKA_BOOTSTRAP_EXTERNAL="localhost:29092"
+
+# Table configurations
+TABLE_CARD="card"
+TABLE_AUTHORIZE_TX="authorize_transaction"
+TABLE_CARD_AUTH="card_authorization"
+```
+
+All setup scripts source this configuration automatically.
+
+## Setup Instructions
+
+### 1. PostgreSQL Configuration
+
+PostgreSQL must be configured with logical replication:
 
 ```bash
 # Stop existing PostgreSQL
@@ -67,33 +136,66 @@ docker run -d --name postgres_container \
   -c max_replication_slots=4
 ```
 
-### 3. Setup Database Publication
-
+**Verify:**
 ```bash
-# Connect to PostgreSQL
-docker exec -it postgres_container psql -U postgres -d instance_template
-
-# Enable REPLICA IDENTITY FULL (captures all column values)
-ALTER TABLE public.m_savings_account_transaction REPLICA IDENTITY FULL;
-
-# Create publication for CDC
-CREATE PUBLICATION instance_template_publication
-FOR TABLE public.m_savings_account_transaction;
-
-# Verify publication
-SELECT * FROM pg_publication_tables WHERE pubname = 'instance_template_publication';
-
-# Exit
-\q
+docker exec postgres_container psql -U postgres -c "SHOW wal_level;"
+# Should output: logical
 ```
 
-### 4. Register Debezium Connector
+### 2. Table Setup
+
+Each table needs two configurations:
+1. **REPLICA IDENTITY FULL** - Captures all column values
+2. **Publication** - Defines which tables to replicate
+
+**For m_savings_account_transaction:**
+
+```sql
+docker exec -it postgres_container psql -U postgres -d instance_template
+
+ALTER TABLE public.m_savings_account_transaction REPLICA IDENTITY FULL;
+CREATE PUBLICATION instance_template_publication
+FOR TABLE public.m_savings_account_transaction;
+```
+
+**For card tables:**
+
+```sql
+ALTER TABLE public.card REPLICA IDENTITY FULL;
+ALTER TABLE public.authorize_transaction REPLICA IDENTITY FULL;
+ALTER TABLE public.card_authorization REPLICA IDENTITY FULL;
+
+CREATE PUBLICATION card_tables_publication FOR TABLE
+  public.card,
+  public.authorize_transaction,
+  public.card_authorization;
+```
+
+**Or use the setup scripts:**
+```bash
+./setup-savings-table.sh   # For savings transactions
+./setup-card-tables.sh     # For card tables
+```
+
+### 3. Debezium Connector Registration
+
+Register connectors to start capturing changes:
+
+```bash
+# For savings transactions
+./register-debezium-savings.sh
+
+# For card tables
+./register-debezium-cards.sh
+```
+
+**Manual registration example:**
 
 ```bash
 curl -X POST http://localhost:8083/connectors \
   -H 'Content-Type: application/json' \
   -d '{
-    "name": "instance-template-source",
+    "name": "card-tables-source",
     "config": {
       "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
       "database.hostname": "host.docker.internal",
@@ -102,9 +204,9 @@ curl -X POST http://localhost:8083/connectors \
       "database.password": "root",
       "database.dbname": "instance_template",
       "database.server.name": "postgres",
-      "table.include.list": "public.m_savings_account_transaction",
-      "publication.name": "instance_template_publication",
-      "slot.name": "instance_template_slot",
+      "table.include.list": "public.card,public.authorize_transaction,public.card_authorization",
+      "publication.name": "card_tables_publication",
+      "slot.name": "card_tables_slot",
       "plugin.name": "pgoutput",
       "snapshot.mode": "initial",
       "key.converter": "org.apache.kafka.connect.json.JsonConverter",
@@ -113,211 +215,244 @@ curl -X POST http://localhost:8083/connectors \
       "value.converter.schemas.enable": "false"
     }
   }'
-
-# Verify connector is RUNNING
-curl http://localhost:8083/connectors/instance-template-source/status | jq
 ```
 
-### 5. Create OpenSearch Index
+**Key Settings:**
+- `snapshot.mode: initial` - Captures existing data on first run, then streams changes
+- `plugin.name: pgoutput` - PostgreSQL's native logical decoding plugin
+- `table.include.list` - Comma-separated list of tables to capture
+
+### 4. OpenSearch Index Creation
+
+Create indices with appropriate mappings:
 
 ```bash
-curl -X PUT 'http://localhost:9200/m_savings_account_transaction' \
+./create-opensearch-indices.sh
+```
+
+This creates indices for all configured tables with optimized field mappings.
+
+### 5. Start Python Consumer
+
+**Single-table consumer:**
+```bash
+python3 kafka-to-opensearch.py
+```
+
+**Multi-table consumer (recommended):**
+```bash
+# Foreground (see progress)
+python3 kafka-to-opensearch-multi.py
+
+# Background
+nohup python3 kafka-to-opensearch-multi.py > cdc-sync.log 2>&1 &
+```
+
+**Consumer features:**
+- Subscribes to multiple Kafka topics simultaneously
+- Handles INSERT/UPDATE (upserts to OpenSearch)
+- Handles DELETE (removes from OpenSearch)
+- Shows progress with emojis:
+  - 📸 Snapshot (existing data)
+  - ➕ Create
+  - ✏️ Update
+  - 🗑️ Delete
+
+## Usage
+
+### Working with Tables that Have Existing Data
+
+The `card` table has existing data. Here's how it works:
+
+1. **Automatic Snapshot:**
+   - Debezium's `snapshot.mode: initial` captures ALL existing rows
+   - Each row is published as CDC event with `op: "r"` (read/snapshot)
+   - Snapshot happens ONCE on first connector registration
+
+2. **After Snapshot:**
+   - Switches to real-time streaming
+   - Captures INSERT, UPDATE, DELETE as they happen
+
+3. **No Manual Data Migration Needed:**
+   - Just start the connector and consumer
+   - Existing data syncs automatically
+   - Real-time changes follow immediately
+
+### Testing CDC Flow
+
+**Insert test data:**
+
+```sql
+docker exec -it postgres_container psql -U postgres -d instance_template
+
+INSERT INTO public.m_savings_account_transaction
+(amount, transaction_date, is_reversed, transaction_type_enum,
+ savings_account_id, office_id, booking_date, created_date,
+ status_enum, running_balance_derived)
+VALUES
+(500.00, CURRENT_DATE, false, 1, 1, 1, CURRENT_DATE,
+ CURRENT_TIMESTAMP, 0, 500.00);
+```
+
+**Update data:**
+
+```sql
+UPDATE public.card SET status = 'BLOCKED' WHERE id = 1;
+```
+
+**Delete data:**
+
+```sql
+DELETE FROM public.card_authorization WHERE id = 12345;
+```
+
+**Verify in OpenSearch:**
+
+```bash
+# Search recent changes
+curl 'http://localhost:9200/card/_search?pretty' \
   -H 'Content-Type: application/json' \
   -d '{
-    "settings": {
-      "number_of_shards": 1,
-      "number_of_replicas": 0
-    },
-    "mappings": {
-      "properties": {
-        "id": {"type": "long"},
-        "amount": {"type": "double"},
-        "transaction_date": {"type": "date"},
-        "savings_account_id": {"type": "long"},
-        "office_id": {"type": "long"},
-        "created_date": {"type": "date"},
-        "running_balance_derived": {"type": "double"}
-      }
-    }
+    "query": {"match_all": {}},
+    "size": 5,
+    "sort": [{"updated_at": {"order": "desc"}}]
+  }'
+
+# Count documents
+curl 'http://localhost:9200/card/_count?pretty'
+
+# Search by field
+curl 'http://localhost:9200/card_authorization/_search?pretty' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "query": {"term": {"card_id": 123}}
   }'
 ```
 
-### 6. Install Python Dependencies
+### Adding More Tables
 
-```bash
-pip3 install kafka-python requests
+1. **Configure PostgreSQL table:**
+```sql
+ALTER TABLE schema.new_table REPLICA IDENTITY FULL;
+ALTER PUBLICATION card_tables_publication ADD TABLE schema.new_table;
 ```
 
-### 7. Start Python Sync Script
-
+2. **Update Debezium connector:**
 ```bash
-# Run in foreground to monitor
-python3 kafka-to-opensearch.py
+# Delete and recreate connector with updated table.include.list
+curl -X DELETE http://localhost:8083/connectors/card-tables-source
 
-# Or run in background
-nohup python3 kafka-to-opensearch.py > kafka-sync.log 2>&1 &
+# Re-register with new table added to table.include.list
+./register-debezium-cards.sh  # (edit script first to add new table)
 ```
 
-## Verification
+3. **Create OpenSearch index:**
+```bash
+curl -X PUT 'http://localhost:9200/new_table' \
+  -H 'Content-Type: application/json' \
+  -d '{"settings": {...}, "mappings": {...}}'
+```
 
-### Quick Test Script
+4. **Update Python consumer:**
+
+Edit `kafka-to-opensearch-multi.py` and add topic mapping:
+
+```python
+TOPIC_INDEX_MAPPING = {
+    # ... existing mappings ...
+    'postgres.public.new_table': 'new_table',
+}
+```
+
+5. **Restart consumer**
+
+## Monitoring
+
+### Quick Health Check
 
 ```bash
 ./quick-test.sh
 ```
 
-This script checks:
-- CDC services are running and healthy
+Checks:
+- CDC services are running
 - PostgreSQL configuration (wal_level=logical)
 - Debezium connector status
 - Kafka topics exist
-- OpenSearch index exists
-- Document counts match between PostgreSQL and OpenSearch
-
-### Manual Verification
-
-```bash
-# 1. Check Kafka topic exists
-docker exec kafka kafka-topics --bootstrap-server localhost:9092 --list | grep m_savings_account_transaction
-
-# 2. View Kafka messages
-docker exec kafka kafka-console-consumer \
-  --bootstrap-server localhost:9092 \
-  --topic m_savings_account_transaction \
-  --from-beginning \
-  --max-messages 5
-
-# 3. Check OpenSearch index
-curl 'http://localhost:9200/_cat/indices?v' | grep m_savings_account_transaction
-
-# 4. Count documents
-curl 'http://localhost:9200/m_savings_account_transaction/_count?pretty'
-
-# 5. Compare counts
-docker exec postgres_container psql -U postgres -d instance_template \
-  -c "SELECT COUNT(*) FROM public.m_savings_account_transaction;"
-```
-
-## Testing CDC Flow
-
-### Insert Test Data
-
-```bash
-# Connect to PostgreSQL
-docker exec -it postgres_container psql -U postgres -d instance_template
-
-# Insert new transaction
-INSERT INTO public.m_savings_account_transaction
-(amount, transaction_date, is_reversed, transaction_type_enum, savings_account_id,
- office_id, booking_date, created_date, status_enum, is_runningbalance_derived,
- is_interest_posted, is_enriched, running_balance_derived)
-VALUES
-(500.00, CURRENT_DATE, false, 1, 1, 1, CURRENT_DATE, CURRENT_TIMESTAMP,
- 0, false, false, false, 500.00);
-```
-
-### Update Existing Data
-
-```sql
-UPDATE public.m_savings_account_transaction
-SET amount = 750.00, running_balance_derived = 750.00
-WHERE id = (SELECT MAX(id) FROM public.m_savings_account_transaction);
-```
-
-### Delete Data
-
-```sql
-DELETE FROM public.m_savings_account_transaction
-WHERE id = (SELECT MAX(id) FROM public.m_savings_account_transaction);
-```
-
-### Verify in OpenSearch
-
-```bash
-# Search for recent transactions
-curl 'http://localhost:9200/m_savings_account_transaction/_search?pretty' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "query": {"match_all": {}},
-    "size": 5,
-    "sort": [{"created_date": {"order": "desc"}}]
-  }'
-
-# Search by amount
-curl 'http://localhost:9200/m_savings_account_transaction/_search?pretty' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "query": {"range": {"amount": {"gte": 500}}}
-  }'
-
-# Search by savings account
-curl 'http://localhost:9200/m_savings_account_transaction/_search?pretty' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "query": {"term": {"savings_account_id": 1}}
-  }'
-```
-
-## Monitoring
+- OpenSearch indices exist
+- Document counts match
 
 ### Kafka UI
 
-Open http://localhost:8080 in your browser to:
-- View Kafka topics and messages
-- Monitor consumer groups
-- Inspect message schemas and payloads
+Open **http://localhost:8080** to:
+- View topics and messages
+- Monitor consumer groups and lag
+- Inspect message schemas
 - Check broker health
 
 ### Check Connector Status
 
 ```bash
-# Debezium source connector
-curl http://localhost:8083/connectors/instance-template-source/status | jq
+# List all connectors
+curl http://localhost:8083/connectors
+
+# Check specific connector
+curl http://localhost:8083/connectors/card-tables-source/status | jq
 
 # Expected output:
 # {
-#   "name": "instance-template-source",
-#   "connector": {
-#     "state": "RUNNING",
-#     "worker_id": "..."
-#   },
-#   "tasks": [...]
+#   "name": "card-tables-source",
+#   "connector": {"state": "RUNNING"},
+#   "tasks": [{"state": "RUNNING"}]
 # }
 ```
 
 ### View Kafka Messages
 
 ```bash
-# View raw CDC messages
+# View messages from beginning
 docker exec kafka kafka-console-consumer \
   --bootstrap-server localhost:9092 \
-  --topic m_savings_account_transaction \
+  --topic postgres.public.card \
   --from-beginning \
-  --max-messages 1
+  --max-messages 5
 
-# Example CDC message structure:
-# {
-#   "before": null,
-#   "after": {
-#     "id": 1,
-#     "amount": 1000000.0,
-#     "transaction_date": 19723,
-#     "savings_account_id": 1,
-#     ...
-#   },
-#   "op": "r",  # r=read, c=create, u=update, d=delete
-#   "ts_ms": 1734000000000
-# }
+# View CDC message structure
+{
+  "before": null,           // Previous state (null for insert)
+  "after": {                // New state (null for delete)
+    "id": 123,
+    "status": "ACTIVE",
+    ...
+  },
+  "op": "r",               // r=snapshot, c=create, u=update, d=delete
+  "ts_ms": 1703000000000   // Timestamp
+}
 ```
 
-### Check Python Sync Script
+### Monitor Python Consumer
 
 ```bash
 # If running in background
-tail -f kafka-sync.log
+tail -f cdc-sync.log
 
-# Check process is running
-ps aux | grep kafka-to-opensearch.py
+# Check if running
+ps aux | grep kafka-to-opensearch
+
+# View statistics (Ctrl+C to see final stats)
+```
+
+### Compare Data Counts
+
+```bash
+# PostgreSQL count
+docker exec postgres_container psql -U postgres -d instance_template \
+  -c "SELECT COUNT(*) FROM card;"
+
+# OpenSearch count
+curl 'http://localhost:9200/card/_count' | jq '.count'
+
+# Should match after snapshot completes!
 ```
 
 ## Troubleshooting
@@ -328,38 +463,44 @@ ps aux | grep kafka-to-opensearch.py
 
 **Fix:**
 ```bash
-# Verify current setting
+# Verify setting
 docker exec postgres_container psql -U postgres -c "SHOW wal_level;"
 
-# If not 'logical', recreate container with flags (see Setup step 2)
+# If not 'logical', recreate container with flags (see Setup section)
 ```
 
 ### Kafka Topic Not Created
 
-**Issue:** Topic `m_savings_account_transaction` doesn't exist
+**Issue:** Topic doesn't exist after registering connector
 
 **Fix:**
 ```bash
-# Check Debezium connector status
-curl http://localhost:8083/connectors/instance-template-source/status | jq
+# Check connector status
+curl http://localhost:8083/connectors/card-tables-source/status | jq
 
-# If connector failed, check logs
+# If failed, check logs
 docker logs debezium
 
 # Restart connector
-curl -X POST http://localhost:8083/connectors/instance-template-source/restart
+curl -X POST http://localhost:8083/connectors/card-tables-source/restart
 ```
 
-### OpenSearch Index Not Found
+### Replication Slot Already Exists
 
-**Error:** `index_not_found_exception`
+**Error:** "replication slot already exists"
 
 **Fix:**
 ```bash
-# Create the index (see Setup step 5)
-curl -X PUT 'http://localhost:9200/m_savings_account_transaction' ...
+# List slots
+docker exec postgres_container psql -U postgres -d instance_template \
+  -c "SELECT * FROM pg_replication_slots;"
 
-# Restart Python sync script to populate data
+# Drop slot
+docker exec postgres_container psql -U postgres -d instance_template \
+  -c "SELECT pg_drop_replication_slot('card_tables_slot');"
+
+# Re-register connector
+./register-debezium-cards.sh
 ```
 
 ### Documents Not Syncing
@@ -368,46 +509,51 @@ curl -X PUT 'http://localhost:9200/m_savings_account_transaction' ...
 
 **Checks:**
 ```bash
-# 1. Verify Debezium is capturing changes
-curl http://localhost:8083/connectors/instance-template-source/status | jq '.tasks[0].state'
+# 1. Debezium capturing changes?
+curl http://localhost:8083/connectors/card-tables-source/status | jq '.tasks[0].state'
+# Should be: "RUNNING"
 
-# 2. Check Kafka has messages
+# 2. Kafka has messages?
 docker exec kafka kafka-console-consumer \
   --bootstrap-server localhost:9092 \
-  --topic m_savings_account_transaction \
+  --topic postgres.public.card \
   --max-messages 1
 
-# 3. Verify Python script is running
-ps aux | grep kafka-to-opensearch.py
+# 3. Python consumer running?
+ps aux | grep kafka-to-opensearch
 
-# 4. Check Python script output
-tail -f kafka-sync.log
+# 4. Check consumer logs
+tail -f cdc-sync.log
 ```
 
-### Replication Slot Already Exists
+### Snapshot Taking Too Long
 
-**Error:** Connector fails with "replication slot already exists"
+**Symptom:** Connector shows "SnapshotReader" for extended time
 
-**Fix:**
+**This is normal for large tables.** Monitor progress:
+
 ```bash
-# List replication slots
-docker exec postgres_container psql -U postgres -d instance_template \
-  -c "SELECT * FROM pg_replication_slots;"
+# Check messages in Kafka (indicates snapshot progress)
+docker exec kafka kafka-run-class kafka.tools.GetOffsetShell \
+  --broker-list localhost:9092 \
+  --topic postgres.public.card
 
-# Drop the slot
-docker exec postgres_container psql -U postgres -d instance_template \
-  -c "SELECT pg_drop_replication_slot('instance_template_slot');"
-
-# Re-register Debezium connector
+# Check Python consumer stats
+tail -f cdc-sync.log
 ```
+
+**For very large tables (millions of rows):**
+- Consider running multiple consumer instances
+- Use OpenSearch bulk API (modify consumer)
+- Disable index refresh during snapshot
 
 ### Service Not Healthy
 
-**Issue:** Docker containers not passing health checks
+**Issue:** Docker containers failing health checks
 
 **Fix:**
 ```bash
-# Check specific service logs
+# Check logs
 docker logs debezium
 docker logs kafka
 docker logs zookeeper
@@ -415,190 +561,163 @@ docker logs zookeeper
 # Restart specific service
 docker-compose -f docker-compose-cdc-only.yml restart debezium
 
-# Or restart all CDC services
+# Or restart all
 docker-compose -f docker-compose-cdc-only.yml down
 docker-compose -f docker-compose-cdc-only.yml up -d
 ```
 
-## Configuration Details
+## Advanced Topics
 
-### PostgreSQL Settings
+### Connector Configuration Details
 
-Required configuration for CDC:
-- **wal_level**: `logical` - Enables logical replication
-- **max_wal_senders**: `4` - Maximum concurrent WAL senders
-- **max_replication_slots**: `4` - Maximum replication slots
+**snapshot.mode options:**
+- `initial` - Full snapshot on first run, then stream (default)
+- `always` - Full snapshot on every connector start
+- `never` - Stream changes only, no snapshot
+- `exported` - Use PostgreSQL's COPY (faster for large tables)
 
-### Debezium Connector Settings
+**Key settings:**
+- `table.include.list` - Tables to capture (comma-separated)
+- `table.exclude.list` - Tables to exclude
+- `publication.name` - PostgreSQL publication name
+- `slot.name` - Replication slot name (must be unique per connector)
+- `heartbeat.interval.ms` - Keep connection alive
 
-| Setting | Value | Description |
-|---------|-------|-------------|
-| connector.class | PostgresConnector | Debezium PostgreSQL connector |
-| plugin.name | pgoutput | Native PostgreSQL logical decoding |
-| snapshot.mode | initial | Full snapshot on first run, then stream changes |
-| table.include.list | public.m_savings_account_transaction | Tables to capture |
-| publication.name | instance_template_publication | PostgreSQL publication name |
-| slot.name | instance_template_slot | Replication slot name |
+### Performance Tuning
 
-### Python Sync Script
+**For large tables:**
 
-The `kafka-to-opensearch.py` script:
-- Consumes messages from Kafka topic
-- Extracts the `after` field from CDC events (contains the new row data)
-- Writes to OpenSearch using document ID from PostgreSQL
-- Handles deletes by removing documents from OpenSearch
-- Auto-commits offsets to track progress
-
-## Useful Commands
-
-### Connector Management
-
+1. **Increase Kafka partitions:**
 ```bash
-# List all connectors
-curl http://localhost:8083/connectors
-
-# Get connector config
-curl http://localhost:8083/connectors/instance-template-source | jq
-
-# Delete connector
-curl -X DELETE http://localhost:8083/connectors/instance-template-source
-
-# Restart connector
-curl -X POST http://localhost:8083/connectors/instance-template-source/restart
+docker exec kafka kafka-topics --bootstrap-server localhost:9092 \
+  --alter --topic postgres.public.card --partitions 3
 ```
 
-### Kafka Operations
-
+2. **Run multiple consumers:**
 ```bash
-# List all topics
+# Same group_id = parallel processing
+python3 kafka-to-opensearch-multi.py &
+python3 kafka-to-opensearch-multi.py &
+```
+
+3. **Disable refresh during snapshot:**
+```bash
+# Before snapshot
+curl -X PUT 'http://localhost:9200/card/_settings' \
+  -H 'Content-Type: application/json' \
+  -d '{"index": {"refresh_interval": "-1"}}'
+
+# After snapshot
+curl -X PUT 'http://localhost:9200/card/_settings' \
+  -H 'Content-Type: application/json' \
+  -d '{"index": {"refresh_interval": "5s"}}'
+```
+
+### Useful Commands
+
+**Connector management:**
+```bash
+# List connectors
+curl http://localhost:8083/connectors
+
+# Delete connector
+curl -X DELETE http://localhost:8083/connectors/card-tables-source
+
+# Pause connector
+curl -X PUT http://localhost:8083/connectors/card-tables-source/pause
+
+# Resume connector
+curl -X PUT http://localhost:8083/connectors/card-tables-source/resume
+```
+
+**Kafka operations:**
+```bash
+# List topics
 docker exec kafka kafka-topics --bootstrap-server localhost:9092 --list
 
 # Describe topic
 docker exec kafka kafka-topics --bootstrap-server localhost:9092 \
-  --describe --topic m_savings_account_transaction
+  --describe --topic postgres.public.card
 
-# Get topic message count (approximate)
-docker exec kafka kafka-run-class kafka.tools.GetOffsetShell \
-  --broker-list localhost:9092 \
-  --topic m_savings_account_transaction
-
-# Delete topic (if needed)
+# Delete topic
 docker exec kafka kafka-topics --bootstrap-server localhost:9092 \
-  --delete --topic m_savings_account_transaction
+  --delete --topic postgres.public.card
 ```
 
-### OpenSearch Operations
-
+**OpenSearch operations:**
 ```bash
-# List all indices
+# List indices
 curl 'http://localhost:9200/_cat/indices?v'
 
-# Get index mapping
-curl 'http://localhost:9200/m_savings_account_transaction/_mapping?pretty'
-
-# Get index settings
-curl 'http://localhost:9200/m_savings_account_transaction/_settings?pretty'
-
-# Count documents
-curl 'http://localhost:9200/m_savings_account_transaction/_count?pretty'
+# Get mapping
+curl 'http://localhost:9200/card/_mapping?pretty'
 
 # Delete index
-curl -X DELETE 'http://localhost:9200/m_savings_account_transaction'
+curl -X DELETE 'http://localhost:9200/card'
 
-# Search all documents
-curl 'http://localhost:9200/m_savings_account_transaction/_search?pretty&size=100'
+# Bulk search
+curl 'http://localhost:9200/card/_search?pretty&size=100'
 ```
 
-### Database Operations
+### Cleanup
 
+**Stop syncing (preserve data):**
 ```bash
-# Connect to PostgreSQL
-docker exec -it postgres_container psql -U postgres -d instance_template
+# Stop consumer
+pkill -f kafka-to-opensearch
 
-# View table structure
-\d public.m_savings_account_transaction
+# Pause connector
+curl -X PUT http://localhost:8083/connectors/card-tables-source/pause
 
-# Check row count
-SELECT COUNT(*) FROM public.m_savings_account_transaction;
-
-# View recent transactions
-SELECT id, amount, transaction_date, created_date
-FROM public.m_savings_account_transaction
-ORDER BY created_date DESC
-LIMIT 10;
-
-# Check replication slots
-SELECT * FROM pg_replication_slots;
-
-# Check publications
-SELECT * FROM pg_publication_tables WHERE pubname = 'instance_template_publication';
-```
-
-## Cleanup
-
-### Stop CDC Services (Preserve Data)
-
-```bash
+# Stop CDC services
 docker-compose -f docker-compose-cdc-only.yml down
 ```
 
-### Stop and Remove All Data
-
+**Remove everything:**
 ```bash
 # Stop CDC services and remove volumes
 docker-compose -f docker-compose-cdc-only.yml down -v
 
-# Delete OpenSearch index
+# Delete connectors
+curl -X DELETE http://localhost:8083/connectors/instance-template-source
+curl -X DELETE http://localhost:8083/connectors/card-tables-source
+
+# Drop PostgreSQL publications and slots
+docker exec postgres_container psql -U postgres -d instance_template <<EOF
+DROP PUBLICATION IF EXISTS instance_template_publication;
+DROP PUBLICATION IF EXISTS card_tables_publication;
+SELECT pg_drop_replication_slot('instance_template_slot');
+SELECT pg_drop_replication_slot('card_tables_slot');
+EOF
+
+# Delete OpenSearch indices
 curl -X DELETE 'http://localhost:9200/m_savings_account_transaction'
-
-# Drop PostgreSQL publication and slot
-docker exec postgres_container psql -U postgres -d instance_template -c "
-  DROP PUBLICATION IF EXISTS instance_template_publication;
-  SELECT pg_drop_replication_slot('instance_template_slot');
-"
+curl -X DELETE 'http://localhost:9200/card'
+curl -X DELETE 'http://localhost:9200/authorize_transaction'
+curl -X DELETE 'http://localhost:9200/card_authorization'
 ```
 
-## Project Files
+## Project Structure
 
 ```
-opensearch_pql_cdc/
-├── README.md                        # This file
-├── docker-compose-cdc-only.yml      # CDC services (Kafka, Debezium, etc.)
-├── kafka-to-opensearch.py           # Python sync script
-├── quick-test.sh                    # Quick verification script
-└── verify-instance-template-cdc.sh  # Detailed verification script
+.
+├── config.sh                          # Centralized configuration
+├── docker-compose-cdc-only.yml        # CDC services definition
+│
+├── kafka-to-opensearch.py             # Single-table consumer
+├── kafka-to-opensearch-multi.py       # Multi-table consumer (recommended)
+│
+├── setup-savings-table.sh             # Setup savings transaction table
+├── setup-card-tables.sh               # Setup card-related tables
+│
+├── register-debezium-savings.sh       # Register savings connector
+├── register-debezium-cards.sh         # Register card connector
+│
+├── create-opensearch-indices.sh       # Create all OpenSearch indices
+│
+├── quick-test.sh                      # Automated verification
+└── README.md                          # This file
 ```
-
-## Use Cases
-
-- **Real-time Search**: Search and analyze savings transactions as they happen
-- **Analytics & Reporting**: Build dashboards in OpenSearch Dashboards
-- **Audit Trail**: Maintain searchable logs of all database changes
-- **Event-Driven Systems**: React to transaction events via Kafka consumers
-- **Data Synchronization**: Keep OpenSearch in sync with PostgreSQL
-
-## Next Steps
-
-1. **Add More Tables**: Modify connector to capture additional tables
-   ```bash
-   # Update table.include.list to:
-   "table.include.list": "public.m_savings_account_transaction,public.m_savings_account,public.m_client"
-   ```
-
-2. **Build Dashboards**: Use OpenSearch Dashboards at http://localhost:5601
-
-3. **Scale Up**: Increase Kafka partitions for higher throughput
-   ```bash
-   docker exec kafka kafka-topics --bootstrap-server localhost:9092 \
-     --alter --topic m_savings_account_transaction --partitions 3
-   ```
-
-4. **Production Hardening**:
-   - Enable SSL/TLS for all connections
-   - Add authentication (PostgreSQL, Kafka, OpenSearch)
-   - Configure retention policies for Kafka topics
-   - Set up monitoring and alerts
-   - Implement backup strategies
 
 ## License
 
