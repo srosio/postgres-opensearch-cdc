@@ -1,0 +1,53 @@
+╔═══════════════════════════════════════════════════════════╗
+║  PostgreSQL → OpenSearch CDC - Quick Start                ║
+╚═══════════════════════════════════════════════════════════╝
+
+📋 PREREQUISITES
+  • Docker & Docker Compose installed
+  • PostgreSQL container: postgres_container (running)
+  • OpenSearch container: ops (running)
+  • Python 3: pip3 install kafka-python requests
+
+🚀 SETUP (3 commands)
+
+  1. Setup everything:
+     ./setup.sh
+
+  2. Start syncing data:
+     python3 consumer.py
+
+  3. Test it works:
+     ./test.sh
+
+📊 MONITOR
+
+  • Kafka UI:    http://localhost:8080
+  • OpenSearch:  http://localhost:9200/_cat/indices?v
+  • Debezium:    http://localhost:8083/connectors
+
+✅ WHAT HAPPENS
+
+  1. setup.sh:
+     - Starts Kafka, Zookeeper, Debezium
+     - Configures PostgreSQL tables for CDC
+     - Registers Debezium connector
+     - Creates OpenSearch indices
+
+  2. consumer.py:
+     - Reads CDC events from Kafka
+     - Syncs to OpenSearch
+     - Shows progress (📸 snapshot, ➕ create, ✏️ update, 🗑️ delete)
+
+  3. test.sh:
+     - Checks all services
+     - Verifies data counts match
+
+📁 FILES (5 total)
+
+  setup.sh              → Complete setup script
+  consumer.py           → Kafka to OpenSearch sync
+  test.sh               → Quick health check
+  docker-compose-cdc-only.yml  → CDC services
+  README.md             → Full documentation
+
+That's it! 🎉
