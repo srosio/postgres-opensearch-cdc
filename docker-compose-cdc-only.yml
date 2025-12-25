@@ -99,46 +99,22 @@ services:
       start_period: 60s
 
   # ============================================
-  # Kafka Connect OpenSearch Sink
+  # OpenSearch Dashboards - Visualization & Analytics
   # ============================================
-  kafka-connect-opensearch:
-    image: confluentinc/cp-kafka-connect:7.5.0
-    container_name: kafka-connect-opensearch
-    hostname: kafka-connect-opensearch
-    depends_on:
-      kafka:
-        condition: service_healthy
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.11.0
+    container_name: opensearch-dashboards
+    hostname: opensearch-dashboards
     environment:
-      CONNECT_BOOTSTRAP_SERVERS: kafka:9092
-      CONNECT_REST_PORT: 8084
-      CONNECT_GROUP_ID: opensearch-sink-group
-      CONNECT_CONFIG_STORAGE_TOPIC: opensearch_connect_configs
-      CONNECT_OFFSET_STORAGE_TOPIC: opensearch_connect_offsets
-      CONNECT_STATUS_STORAGE_TOPIC: opensearch_connect_statuses
-      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
-      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
-      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
-      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
-      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
-      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect-opensearch
-      CONNECT_PLUGIN_PATH: /usr/share/confluent-hub-components,/usr/share/java
+      OPENSEARCH_HOSTS: '["http://host.docker.internal:9200"]'
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
     ports:
-      - "8084:8084"
+      - "5601:5601"
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    command:
-      - bash
-      - -c
-      - |
-        echo "Installing Elasticsearch connector (compatible with OpenSearch)..."
-        confluent-hub install --no-prompt confluentinc/kafka-connect-elasticsearch:14.0.12
-        echo "Starting Kafka Connect..."
-        /etc/confluent/docker/run
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8084/connectors"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 120s
+      test: ["CMD", "curl", "-f", "http://localhost:5601/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s

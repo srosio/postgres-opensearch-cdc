@@ -65,6 +65,7 @@ OPENSEARCH_URL="http://localhost:9200"
 | Kafka UI | 8080 | http://localhost:8080 |
 | Debezium | 8083 | http://localhost:8083 |
 | OpenSearch | 9200 | http://localhost:9200 |
+| OpenSearch Dashboards | 5601 | http://localhost:5601 |
 
 ## Testing Changes
 
@@ -81,7 +82,26 @@ VALUES (1, 1, 'TEST123', 'ACTIVE', 'PRODUCED', 'DEBIT', 'VISA', false, true, 'NO
 
 # Verify in OpenSearch
 curl 'http://localhost:9200/card/_doc/123'
+
+# Or view in OpenSearch Dashboards
+# http://localhost:5601 → Dev Tools → Run queries
 ```
+
+## Using OpenSearch Dashboards
+
+**Access:** http://localhost:5601
+
+**Features:**
+- **Discover:** Search and filter your data
+- **Dashboard:** Create visualizations and dashboards
+- **Dev Tools:** Run queries and manage indices
+
+**Quick Start:**
+1. Open http://localhost:5601
+2. Go to "Management" → "Index Patterns"
+3. Create index pattern: `card*` or `*` for all indices
+4. Go to "Discover" to explore your data
+5. Create visualizations in "Dashboard"
 
 ## Troubleshooting
 

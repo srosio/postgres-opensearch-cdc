@@ -21,9 +21,10 @@
 
 📊 MONITOR
 
-  • Kafka UI:    http://localhost:8080
-  • OpenSearch:  http://localhost:9200/_cat/indices?v
-  • Debezium:    http://localhost:8083/connectors
+  • Kafka UI:               http://localhost:8080
+  • OpenSearch Dashboards:  http://localhost:5601
+  • OpenSearch API:         http://localhost:9200/_cat/indices?v
+  • Debezium:               http://localhost:8083/connectors
 
 ✅ WHAT HAPPENS
 
