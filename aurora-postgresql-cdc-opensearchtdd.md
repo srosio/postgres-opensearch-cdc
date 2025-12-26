@@ -643,7 +643,7 @@ PUT _plugins/_ism/policies/cdc-lifecycle
 │     ┌─────────────────────────────────────────────────────────┐             │
 │     │ INSERT INTO orders (id, customer_id, amount, status)    │             │
 │     │ VALUES (123, 456, 99.99, 'pending');                    │             │
-│     │ COMMIT;                                                  │            │
+│     │ COMMIT;                                                 │             │
 │     └─────────────────────────────────────────────────────────┘             │
 │                              │                                              │
 │                              ▼                                              │
@@ -656,7 +656,7 @@ PUT _plugins/_ism/policies/cdc-lifecycle
 │                              ▼                                              │
 │  3. DMS Capture & Transform                                                 │
 │     ┌─────────────────────────────────────────────────────────┐             │
-│     │ {                                                        │            │
+│     │ {                                                       │             │
 │     │   "metadata": {                                         │             │
 │     │     "operation": "insert",                              │             │
 │     │     "schema-name": "public",                            │             │
@@ -669,13 +669,13 @@ PUT _plugins/_ism/policies/cdc-lifecycle
 │     │     "amount": 99.99,                                    │             │
 │     │     "status": "pending"                                 │             │
 │     │   }                                                     │             │
-│     │ }                                                        │            │
+│     │ }                                                       │             │
 │     └─────────────────────────────────────────────────────────┘             │
 │                              │                                              │
 │                              ▼                                              │
 │  4. Kinesis Stream (Partition: public.orders)                               │
 │     ┌─────────────────────────────────────────────────────────┐             │
-│     │ Shard-001: [event1, event2, event3, ...]               │              │
+│     │ Shard-001: [event1, event2, event3, ...]                │             │
 │     └─────────────────────────────────────────────────────────┘             │
 │                              │                                              │
 │                              ▼                                              │
